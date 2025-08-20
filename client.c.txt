@@ -1,0 +1,144 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <time.h>
+
+#define SERVER_IP "127.0.0.1"
+#define PORT 5001
+#define BUFFER_SIZE 4096
+
+void upload_file(int sock, const char *filename) {
+    FILE *file = fopen(filename, "rb");
+    if (!file) {
+        // Notify server that upload is aborted
+        char *abort_msg = "ABORT";
+        send(sock, abort_msg, strlen(abort_msg), 0);
+        perror("File not found");
+        close(sock);
+        return;
+    }
+
+    // Notify server that we're ready
+    send(sock, "READY", strlen("READY"), 0);
+    usleep(100000);
+
+    char buffer[BUFFER_SIZE];
+    ssize_t bytes_read;
+    struct timespec start, end;
+    long total_bytes = 0;
+
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    while ((bytes_read = fread(buffer, 1, BUFFER_SIZE, file)) > 0) {
+        send(sock, buffer, bytes_read, 0);
+        total_bytes += bytes_read;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &end);
+
+    fclose(file);
+    close(sock);
+
+    double time_taken = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+    double speed = (total_bytes / (1024.0 * 1024.0)) / time_taken;
+
+    printf("File uploaded.\nTotal: %ld bytes, Time: %.2f sec, Speed: %.2f Mbps\n",
+           total_bytes, time_taken, speed);
+}
+
+void download_file(int sock, const char *filename) {
+    FILE *file = fopen("downloaded_file", "wb");
+    if (!file) {
+        perror("Error creating output file");
+        close(sock);
+        return;
+    }
+
+    char buffer[BUFFER_SIZE];
+    ssize_t bytes_received;
+    struct timespec start, end;
+    long total_bytes = 0;
+
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    while ((bytes_received = recv(sock, buffer, BUFFER_SIZE, 0)) > 0) {
+        if (strncmp(buffer, "ERROR", 5) == 0) {
+            printf("%s", buffer);
+            fclose(file);
+            remove("downloaded_file");
+            close(sock);
+            return;
+        }
+
+        fwrite(buffer, 1, bytes_received, file);
+        total_bytes += bytes_received;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &end);
+
+    fclose(file);
+    close(sock);
+
+    double time_taken = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+    double speed = (total_bytes / (1024.0 * 1024.0)) / time_taken;
+
+    printf("File downloaded.\nTotal: %ld bytes, Time: %.2f sec, Speed: %.2f Mbps\n",
+           total_bytes, time_taken, speed);
+}
+
+int main() {
+    while (1) {
+        char choice[10], filename[256];
+
+        printf("\n==== FILE TRANSFER CLIENT MENU ====\n");
+        printf("1. Upload file to server\n");
+        printf("2. Download file from server\n");
+        printf("3. Exit\n");
+        printf("Enter choice (1/2/3): ");
+        fflush(stdout);
+        fgets(choice, sizeof(choice), stdin);
+
+        if (choice[0] == '3') {
+            printf("Exiting client.\n");
+            break;
+        }
+
+        printf("Enter filename: ");
+        fflush(stdout);
+        fgets(filename, sizeof(filename), stdin);
+        filename[strcspn(filename, "\n")] = '\0'; // remove newline
+
+        // Set up socket
+        int sock = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock < 0) {
+            perror("Socket creation failed");
+            continue;
+        }
+
+        struct sockaddr_in server_addr;
+        server_addr.sin_family = AF_INET;
+        server_addr.sin_port = htons(PORT);
+        inet_pton(AF_INET, SERVER_IP, &server_addr.sin_addr);
+
+        if (connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+            perror("Connection failed");
+            close(sock);
+            continue;
+        }
+
+        if (choice[0] == '1') {
+            send(sock, "UPLOAD", strlen("UPLOAD"), 0);
+            usleep(100000); // delay to separate messages
+            send(sock, filename, strlen(filename), 0);
+            upload_file(sock, filename);
+        } else if (choice[0] == '2') {
+            send(sock, "DOWNLOAD", strlen("DOWNLOAD"), 0);
+            usleep(100000); // delay to separate messages
+            send(sock, filename, strlen(filename), 0);
+            download_file(sock, filename);
+        } else {
+            printf(" Invalid choice. Try again.\n");
+            close(sock);
+        }
+    }
+
+    return 0;
+}
